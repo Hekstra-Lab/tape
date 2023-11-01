@@ -1,4 +1,4 @@
-from fat.layers import FatBlock,FatOutput
+from fat.layers import FatBlock,FatOutput,Linear,FeedForward
 import torch
 import torch.nn as nn
 from tape import ProteinModel, ProteinConfig
@@ -37,7 +37,7 @@ class FatModel(FatAbstractModel):
     # init expects only a single argument - the config
     def __init__(self, config: FatConfig):
         super().__init__(config)
-        self.embedding = nn.Embedding(config.vocab_size, config.dmodel, max_norm=1.)
+        self.embedding = nn.Embedding(config.vocab_size, config.dmodel)
         layers = []
         for i in range(config.num_layers):
             layers.append(FatBlock(config.dmodel))
@@ -71,8 +71,37 @@ class FatModel(FatAbstractModel):
         return outputs
 
 
-# This registers the model to a specific task, allowing you to use all of TAPE's
-# machinery to train it.
+
+@registry.register_task_model('masked_language_modeling', 'fat')
+class FatForMaskedLM(FatAbstractModel):
+
+    def __init__(self, config: FatConfig):
+        super().__init__(config)
+
+        self.fat = FatModel(config)
+        self.decoder = nn.Sequential(
+            FeedForward(config.dmodel),
+            nn.Linear(config.dmodel, config.vocab_size),
+        )
+
+    def forward(self,
+                input_ids,
+                input_mask=None,
+                targets=None):
+
+        embedding,pooled = self.fat(input_ids, input_mask=input_mask)
+        logits = self.decoder(embedding)
+
+        if targets is not None:
+            loss_fct = nn.CrossEntropyLoss(ignore_index=-1)
+            masked_lm_loss = loss_fct(
+                logits.view(-1, self.config.vocab_size), targets.view(-1))
+            metrics = {'perplexity': torch.exp(masked_lm_loss)}
+            loss_and_metrics = (masked_lm_loss, metrics)
+            outputs = (loss_and_metrics,) + (logits, embedding, pooled)
+        return outputs
+
+
 @registry.register_task_model('secondary_structure', 'fat')
 class FatForSequenceToSequenceClassification(FatAbstractModel):
 
