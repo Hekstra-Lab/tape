@@ -5,6 +5,25 @@ from tape import ProteinModel, ProteinConfig
 from tape.models.modeling_utils import SequenceToSequenceClassificationHead
 from tape.registry import registry
 
+class FatEmbedding(torch.nn.Embedding):
+    def reset_parameters(self) -> None:
+        torch.nn.init.eye_(self.weight)
+
+    def forward(self, data : torch.Tensor) -> torch.Tensor:
+        mask = torch.eye(*self.weight.shape, device=self.weight.device, dtype=torch.bool)
+        weight = torch.where(mask, 1., self.weight)
+        out = torch.nn.functional.embedding(data, weight, self.padding_idx, self.max_norm, self.norm_type, self.scale_grad_by_freq, self.sparse)
+        return out
+
+class FatEmbedding(torch.nn.Embedding):
+    def forward(self, data : torch.Tensor) -> torch.Tensor:
+        logits = torch.concat((
+            torch.ones_like(self.weight[...,:1]),
+            self.weight[...,1:],
+        ), axis=-1)
+        weight = torch.nn.functional.softmax(logits, dim=-1)
+        out = torch.nn.functional.embedding(data, weight, self.padding_idx, self.max_norm, self.norm_type, self.scale_grad_by_freq, self.sparse)
+        return out
 
 class FatConfig(ProteinConfig):
     """ 
@@ -37,7 +56,7 @@ class FatModel(FatAbstractModel):
     # init expects only a single argument - the config
     def __init__(self, config: FatConfig):
         super().__init__(config)
-        self.embedding = nn.Embedding(config.vocab_size, config.dmodel)
+        self.embedding = FatEmbedding(config.vocab_size, config.dmodel)
         layers = []
         for i in range(config.num_layers):
             layers.append(FatBlock(config.dmodel))
@@ -70,19 +89,26 @@ class FatModel(FatAbstractModel):
         outputs = (out, pooled)
         return outputs
 
+class FatDecoder(torch.nn.Module):
+    def __init__(self, dmodel, vocab_size):
+        super().__init__()
+        self.linear = nn.Linear(2*dmodel, vocab_size-1)
 
+    def forward(self, embedding):
+        logits = self.linear(embedding)
+        logits = torch.concat((
+            torch.zeros_like(logits[...,:1]),
+            logits,
+        ), axis=-1)
+        return logits
 
 @registry.register_task_model('masked_language_modeling', 'fat')
 class FatForMaskedLM(FatAbstractModel):
 
     def __init__(self, config: FatConfig):
         super().__init__(config)
-
         self.fat = FatModel(config)
-        self.decoder = nn.Sequential(
-            FeedForward(config.dmodel),
-            nn.Linear(config.dmodel, config.vocab_size),
-        )
+        self.decoder = FatDecoder(config.dmodel, config.vocab_size)
 
     def forward(self,
                 input_ids,
